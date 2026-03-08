@@ -10,7 +10,7 @@ from homeassistant.const import CONF_LANGUAGE
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from ..api import SonioxAuthenticationError, SonioxCommunicationError, SonioxError, SonioxTranscriptionError
-from ..const import AUTO_LANGUAGE, TITLE
+from ..const import AUTO_LANGUAGE, LANGUAGE_TAGS, TITLE
 from ..data import SonioxConfigEntry
 
 if TYPE_CHECKING:
@@ -55,8 +55,8 @@ class SonioxSpeechToTextEntity(stt.SpeechToTextEntity):
     def supported_languages(self) -> list[str]:
         """Return the supported languages exposed to Assist."""
         if self._configured_language != AUTO_LANGUAGE:
-            return [self._configured_language]
-        return list(self._available_languages)
+            return _expand_language_tags((self._configured_language,))
+        return _expand_language_tags(self._available_languages)
 
     @property
     def supported_formats(self) -> list[stt.AudioFormats]:
@@ -107,7 +107,9 @@ class SonioxSpeechToTextEntity(stt.SpeechToTextEntity):
             return False
 
         normalized_language = _normalize_language(metadata.language)
-        return normalized_language in self.supported_languages
+        if self._configured_language != AUTO_LANGUAGE:
+            return normalized_language == self._configured_language
+        return normalized_language in self._available_languages
 
     async def async_process_audio_stream(
         self,
@@ -152,3 +154,15 @@ def _normalize_language(language: str) -> str:
     """Normalize a Home Assistant language tag into a Soniox language code."""
     normalized = language.lower().replace("_", "-")
     return normalized.split("-", maxsplit=1)[0]
+
+
+def _expand_language_tags(languages: tuple[str, ...]) -> list[str]:
+    """Expand Soniox base language codes to HA-friendly locale tags."""
+    expanded: list[str] = []
+
+    for language in languages:
+        for tag in LANGUAGE_TAGS.get(language, (language,)):
+            if tag not in expanded:
+                expanded.append(tag)
+
+    return expanded
