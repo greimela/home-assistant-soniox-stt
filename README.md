@@ -1,13 +1,11 @@
-# Home Assistant Integration Blueprint
+# Soniox Speech-to-Text for Home Assistant
 
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2025.11%2B-blue.svg)](https://www.home-assistant.io/)
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/)
 [![AI Agent Ready](https://img.shields.io/badge/AI%20Agent-Ready-purple.svg)](#ai-agent-support)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-A modern blueprint for creating Home Assistant custom integrations, based on [ludeeus/integration_blueprint](https://github.com/ludeeus/integration_blueprint) but closely aligned with **Home Assistant Core development practices**.
-
-This blueprint is designed to work with **Home Assistant 2025.7+** and includes all the patterns and tooling you need to build a professional integration without reinventing the wheel.
+Custom Home Assistant speech-to-text integration for [Soniox](https://soniox.com/), intended for use in the normal Assist voice pipeline with selectable language handling.
 
 ## 📋 Quick Navigation
 
