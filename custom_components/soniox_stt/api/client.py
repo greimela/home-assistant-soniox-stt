@@ -92,8 +92,7 @@ class SonioxApiClient:
             language_hints_strict=bool(language),
         )
 
-        final_tokens: list[Token] = []
-        non_final_tokens: list[Token] = []
+        transcript = ""
         sender_task: asyncio.Task[None] | None = None
         keep_alive_task: asyncio.Task[None] | None = None
 
@@ -106,8 +105,10 @@ class SonioxApiClient:
                     if event.error_message:
                         raise SonioxTranscriptionError(event.error_message)
 
-                    final_tokens = [token for token in event.tokens if token.is_final]
-                    non_final_tokens = [token for token in event.tokens if not token.is_final]
+                    if event.tokens:
+                        rendered = self._render_event_tokens(event.tokens).strip()
+                        if rendered:
+                            transcript = rendered
 
                     if event.finished:
                         break
@@ -130,7 +131,6 @@ class SonioxApiClient:
                 sender_task.cancel()
                 await asyncio.gather(sender_task, return_exceptions=True)
 
-        transcript = render_tokens(final_tokens, non_final_tokens).strip()
         if not transcript:
             msg = "Soniox did not return any transcript text"
             raise SonioxTranscriptionError(msg)
@@ -142,6 +142,7 @@ class SonioxApiClient:
         async for chunk in audio_stream:
             if chunk:
                 await session.send_byte_chunk(bytes(chunk))
+        await session.send_finalize()
         await session.send_finish()
 
     async def _keep_alive(self, session) -> None:
@@ -149,3 +150,9 @@ class SonioxApiClient:
         while True:
             await asyncio.sleep(KEEP_ALIVE_SECONDS)
             await session.send_keep_alive()
+
+    def _render_event_tokens(self, tokens: list[Token]) -> str:
+        """Render a Soniox realtime event into human-readable text."""
+        final_tokens = [token for token in tokens if token.is_final]
+        non_final_tokens = [token for token in tokens if not token.is_final]
+        return render_tokens(final_tokens, non_final_tokens)
