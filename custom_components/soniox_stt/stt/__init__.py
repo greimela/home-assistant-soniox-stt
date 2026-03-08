@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import AsyncIterable
+import logging
 from typing import TYPE_CHECKING, Any
 
+from custom_components.soniox_stt.api import (
+    SonioxAuthenticationError,
+    SonioxCommunicationError,
+    SonioxError,
+    SonioxTranscriptionError,
+)
+from custom_components.soniox_stt.const import AUTO_LANGUAGE, LANGUAGE_TAGS, TITLE
+from custom_components.soniox_stt.data import SonioxConfigEntry
 from homeassistant.components import stt
 from homeassistant.const import CONF_LANGUAGE
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-
-from ..api import SonioxAuthenticationError, SonioxCommunicationError, SonioxError, SonioxTranscriptionError
-from ..const import AUTO_LANGUAGE, LANGUAGE_TAGS, TITLE
-from ..data import SonioxConfigEntry
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant

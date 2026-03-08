@@ -17,7 +17,7 @@ from soniox.types import Token
 from soniox.types.realtime import RealtimeSTTConfig
 from soniox.utils import render_tokens
 
-from ..const import DEFAULT_MODEL
+from custom_components.soniox_stt.const import DEFAULT_MODEL
 
 CHUNK_SIZE_BYTES: Final = 4096
 KEEP_ALIVE_SECONDS: Final = 10.0
