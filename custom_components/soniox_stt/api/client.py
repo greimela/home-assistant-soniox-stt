@@ -194,9 +194,7 @@ class SonioxApiClient:
         )
         return transcript
 
-    async def _send_audio(
-        self, session: Connection, audio_stream: AsyncIterable[bytes]
-    ) -> tuple[int, int]:
+    async def _send_audio(self, session: Connection, audio_stream: AsyncIterable[bytes]) -> tuple[int, int]:
         """Send audio chunks to the active Soniox realtime session."""
         chunk_count = 0
         byte_count = 0
