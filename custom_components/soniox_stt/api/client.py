@@ -49,8 +49,7 @@ class SonioxApiClient:
 
         for model in models:
             if model.get("id") == self._model:
-                languages = model.get("supported_languages", [])
-                return tuple(sorted(language for language in languages if isinstance(language, str)))
+                return self._extract_language_codes(model)
 
         async_models = [
             model
@@ -58,8 +57,7 @@ class SonioxApiClient:
             if isinstance(model.get("id"), str) and str(model["id"]).startswith("stt-async")
         ]
         if async_models:
-            languages = async_models[0].get("supported_languages", [])
-            return tuple(sorted(language for language in languages if isinstance(language, str)))
+            return self._extract_language_codes(async_models[0])
 
         msg = f"Soniox model {self._model} is not available for this API key"
         raise SonioxError(msg)
@@ -115,6 +113,7 @@ class SonioxApiClient:
         }
         if language:
             payload["language_hints"] = [language]
+            payload["language_hints_strict"] = True
 
         response = await self._request("post", "/v1/transcriptions", json=payload)
         transcription_id = response.get("id")
@@ -159,6 +158,22 @@ class SonioxApiClient:
                 parts.append(text)
 
         return "".join(parts)
+
+    def _extract_language_codes(self, model: dict[str, Any]) -> tuple[str, ...]:
+        """Extract ISO language codes from a Soniox model payload."""
+        languages = model.get("languages", [])
+        if not isinstance(languages, list):
+            msg = "Soniox model response did not include a valid languages list"
+            raise SonioxError(msg)
+
+        codes: list[str] = []
+        for language in languages:
+            if isinstance(language, dict):
+                code = language.get("code")
+                if isinstance(code, str):
+                    codes.append(code)
+
+        return tuple(sorted(codes))
 
     async def _best_effort_delete_transcription(self, transcription_id: str) -> None:
         """Delete a transcription without masking the original result."""
