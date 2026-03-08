@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterable, AsyncIterator
 import json
+import logging
 import ssl
 from typing import Final
 
@@ -27,6 +28,7 @@ from custom_components.soniox_stt.const import DEFAULT_MODEL
 
 CHUNK_SIZE_BYTES: Final = 4096
 KEEP_ALIVE_SECONDS: Final = 10.0
+LOGGER = logging.getLogger(__name__)
 
 
 class SonioxError(Exception):
@@ -92,7 +94,9 @@ class SonioxApiClient:
         """Stream audio to Soniox and return the final transcript text."""
         config = RealtimeSTTConfig(
             model=self._model,
-            audio_format="auto",
+            audio_format="pcm_s16le",
+            num_channels=1,
+            sample_rate=16000,
             language_hints=[language] if language else None,
             language_hints_strict=bool(language),
         )
@@ -101,8 +105,19 @@ class SonioxApiClient:
         non_final_tokens: list[Token] = []
         transcript = ""
         last_event: RealtimeEvent | None = None
-        sender_task: asyncio.Task[None] | None = None
+        sender_task: asyncio.Task[tuple[int, int]] | None = None
         keep_alive_task: asyncio.Task[None] | None = None
+        chunks_sent = 0
+        bytes_sent = 0
+
+        LOGGER.info(
+            "Starting Soniox realtime STT model=%s language=%s audio_format=%s sample_rate=%s channels=%s",
+            self._model,
+            language,
+            config.audio_format,
+            config.sample_rate,
+            config.num_channels,
+        )
 
         try:
             async with await self._async_connect_realtime(config) as session:
@@ -111,6 +126,14 @@ class SonioxApiClient:
 
                 async for event in self._receive_events(session):
                     last_event = event
+                    LOGGER.info(
+                        "Soniox realtime event finished=%s tokens=%s error=%r final_audio_proc_ms=%s total_audio_proc_ms=%s",
+                        event.finished,
+                        len(event.tokens),
+                        event.error_message,
+                        event.final_audio_proc_ms,
+                        event.total_audio_proc_ms,
+                    )
                     if event.error_message:
                         raise SonioxTranscriptionError(event.error_message)
 
@@ -125,7 +148,7 @@ class SonioxApiClient:
                         break
 
                 if sender_task is not None:
-                    await sender_task
+                    chunks_sent, bytes_sent = await sender_task
         except SDKSonioxAuthenticationError as err:
             raise SonioxAuthenticationError(str(err)) from err
         except (SDKSonioxRealtimeError, SDKSonioxAPIError, SDKSonioxValidationError) as err:
@@ -151,17 +174,49 @@ class SonioxApiClient:
                     f"error={last_event.error_message!r})"
                 )
             msg = f"Soniox did not return any transcript text{details}"
+            LOGGER.info(
+                "Soniox realtime STT finished without transcript model=%s language=%s chunks_sent=%s bytes_sent=%s%s",
+                self._model,
+                language,
+                chunks_sent,
+                bytes_sent,
+                details,
+            )
             raise SonioxTranscriptionError(msg)
 
+        LOGGER.info(
+            "Soniox realtime STT succeeded model=%s language=%s chunks_sent=%s bytes_sent=%s transcript_chars=%s",
+            self._model,
+            language,
+            chunks_sent,
+            bytes_sent,
+            len(transcript),
+        )
         return transcript
 
-    async def _send_audio(self, session: Connection, audio_stream: AsyncIterable[bytes]) -> None:
+    async def _send_audio(
+        self, session: Connection, audio_stream: AsyncIterable[bytes]
+    ) -> tuple[int, int]:
         """Send audio chunks to the active Soniox realtime session."""
+        chunk_count = 0
+        byte_count = 0
+
         async for chunk in audio_stream:
             if chunk:
-                await session.send(bytes(chunk))
+                chunk_bytes = bytes(chunk)
+                chunk_count += 1
+                byte_count += len(chunk_bytes)
+                await session.send(chunk_bytes)
+
+        LOGGER.info(
+            "Finished sending audio to Soniox realtime websocket chunks=%s bytes=%s",
+            chunk_count,
+            byte_count,
+        )
         await session.send(json.dumps({"type": "finalize"}))
         await session.send("")
+        LOGGER.info("Sent finalize and finish to Soniox realtime websocket")
+        return chunk_count, byte_count
 
     async def _keep_alive(self, session: Connection) -> None:
         """Keep the realtime websocket alive while audio is streaming."""
@@ -172,6 +227,7 @@ class SonioxApiClient:
     async def _async_connect_realtime(self, config: RealtimeSTTConfig) -> Connection:
         """Open a realtime websocket using a prebuilt SSL context."""
         ssl_context = await self._async_get_ssl_context()
+        LOGGER.info("Connecting to Soniox realtime websocket url=%s", self._client.websocket_base_url)
         session = await connect(
             self._client.websocket_base_url,
             ssl=ssl_context,
@@ -182,6 +238,7 @@ class SonioxApiClient:
             await session.close()
             raise
         else:
+            LOGGER.info("Connected to Soniox realtime websocket")
             return session
 
     async def _async_get_ssl_context(self) -> ssl.SSLContext:
