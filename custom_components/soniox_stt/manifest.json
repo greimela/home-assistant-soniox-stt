@@ -1,0 +1,14 @@
+{
+  "domain": "soniox_stt",
+  "name": "Soniox Speech-to-Text",
+  "codeowners": [
+    "@greimela"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/greimela/home-assistant-soniox-stt",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/greimela/home-assistant-soniox-stt/issues",
+  "single_config_entry": true,
+  "version": "0.1.0"
+}
