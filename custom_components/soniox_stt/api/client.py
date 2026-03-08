@@ -29,6 +29,7 @@ from custom_components.soniox_stt.const import DEFAULT_MODEL
 CHUNK_SIZE_BYTES: Final = 4096
 KEEP_ALIVE_SECONDS: Final = 10.0
 LOGGER = logging.getLogger(__name__)
+CONTROL_TOKENS: Final = frozenset({"<fin>"})
 
 
 class SonioxError(Exception):
@@ -138,8 +139,9 @@ class SonioxApiClient:
                         raise SonioxTranscriptionError(event.error_message)
 
                     if event.tokens:
-                        final_tokens.extend(token for token in event.tokens if token.is_final)
-                        non_final_tokens = [token for token in event.tokens if not token.is_final]
+                        filtered_tokens = [token for token in event.tokens if token.text not in CONTROL_TOKENS]
+                        final_tokens.extend(token for token in filtered_tokens if token.is_final)
+                        non_final_tokens = [token for token in filtered_tokens if not token.is_final]
                         rendered = render_tokens(final_tokens, non_final_tokens).strip()
                         if rendered:
                             transcript = rendered
