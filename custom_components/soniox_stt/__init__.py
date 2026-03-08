@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 from homeassistant.const import CONF_API_KEY, Platform
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import homeassistant.helpers.config_validation as cv
 
 from .api import SonioxApiClient, SonioxAuthenticationError, SonioxCommunicationError
@@ -32,7 +31,6 @@ async def async_setup_entry(
     """Set up Soniox from a config entry."""
     client = SonioxApiClient(
         api_key=entry.data[CONF_API_KEY],
-        session=async_get_clientsession(hass),
     )
 
     try:
@@ -57,7 +55,10 @@ async def async_unload_entry(
     entry: SonioxConfigEntry,
 ) -> bool:
     """Unload a config entry."""
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok:
+        await entry.runtime_data.client.async_aclose()
+    return unload_ok
 
 
 async def async_reload_entry(

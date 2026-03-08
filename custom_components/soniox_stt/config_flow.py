@@ -10,7 +10,6 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import CONF_API_KEY, CONF_LANGUAGE
 from homeassistant.helpers import selector
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import SonioxApiClient, SonioxAuthenticationError, SonioxCommunicationError
 from .const import AUTO_LANGUAGE, DOMAIN, LANGUAGE_NAMES, TITLE
@@ -144,7 +143,6 @@ class SonioxSTTConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             client = SonioxApiClient(
                 api_key=user_input[CONF_API_KEY],
-                session=async_get_clientsession(self.hass),
             )
             try:
                 self._languages = await client.async_get_supported_languages()

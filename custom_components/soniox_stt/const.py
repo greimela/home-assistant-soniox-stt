@@ -6,10 +6,8 @@ LOGGER: Logger = getLogger(__package__)
 
 DOMAIN = "soniox_stt"
 TITLE = "Soniox Speech-to-Text"
-DEFAULT_MODEL = "stt-async-v4"
+DEFAULT_MODEL = "stt-rt-v4"
 AUTO_LANGUAGE = "auto"
-TRANSCRIPTION_TIMEOUT_SECONDS = 60
-POLL_INTERVAL_SECONDS = 1.0
 
 LANGUAGE_NAMES: dict[str, str] = {
     "ar": "Arabic",

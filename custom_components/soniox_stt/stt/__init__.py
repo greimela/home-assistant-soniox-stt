@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterable
 from typing import TYPE_CHECKING, Any
 
@@ -16,17 +17,7 @@ from ..data import SonioxConfigEntry
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
-
-AUDIO_CONTENT_TYPES = {
-    stt.AudioFormats.WAV: "audio/wav",
-    stt.AudioFormats.OGG: "audio/ogg",
-}
-
-FILENAME_EXTENSIONS = {
-    stt.AudioFormats.WAV: "wav",
-    stt.AudioFormats.OGG: "ogg",
-}
-
+LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -61,27 +52,27 @@ class SonioxSpeechToTextEntity(stt.SpeechToTextEntity):
     @property
     def supported_formats(self) -> list[stt.AudioFormats]:
         """Return the supported container formats."""
-        return [stt.AudioFormats.WAV, stt.AudioFormats.OGG]
+        return [stt.AudioFormats.WAV]
 
     @property
     def supported_codecs(self) -> list[stt.AudioCodecs]:
         """Return the supported audio codecs."""
-        return [stt.AudioCodecs.PCM, stt.AudioCodecs.OPUS]
+        return [stt.AudioCodecs.PCM]
 
     @property
-    def supported_bit_rates(self) -> list[int]:
+    def supported_bit_rates(self) -> list[stt.AudioBitRates]:
         """Return the supported audio bit depths."""
-        return [16]
+        return [stt.AudioBitRates.BITRATE_16]
 
     @property
-    def supported_sample_rates(self) -> list[int]:
+    def supported_sample_rates(self) -> list[stt.AudioSampleRates]:
         """Return the supported audio sample rates."""
-        return [16000]
+        return [stt.AudioSampleRates.SAMPLERATE_16000]
 
     @property
-    def supported_channels(self) -> list[int]:
+    def supported_channels(self) -> list[stt.AudioChannels]:
         """Return the supported channel counts."""
-        return [1]
+        return [stt.AudioChannels.CHANNEL_MONO]
 
     @property
     def device_info(self) -> dict[str, Any]:
@@ -117,31 +108,21 @@ class SonioxSpeechToTextEntity(stt.SpeechToTextEntity):
         stream: AsyncIterable[bytes],
     ) -> stt.SpeechResult:
         """Transcribe an audio stream with Soniox."""
-        content_type = AUDIO_CONTENT_TYPES.get(metadata.format)
-        extension = FILENAME_EXTENSIONS.get(metadata.format)
-
-        if content_type is None or extension is None:
-            return stt.SpeechResult(None, stt.SpeechResultState.ERROR)
-
-        audio = bytearray()
-        async for chunk in stream:
-            audio.extend(chunk)
-
-        if not audio:
-            return stt.SpeechResult(None, stt.SpeechResultState.ERROR)
-
         selected_language = self._configured_language
         if selected_language == AUTO_LANGUAGE:
             selected_language = _normalize_language(metadata.language)
 
         try:
-            text = await self._client.async_transcribe(
-                audio=bytes(audio),
-                filename=f"assist.{extension}",
-                content_type=content_type,
+            text = await self._client.async_transcribe_stream(
+                audio_stream=stream,
                 language=selected_language,
             )
         except (SonioxAuthenticationError, SonioxCommunicationError, SonioxTranscriptionError, SonioxError):
+            LOGGER.exception(
+                "Soniox STT failed for language=%s metadata=%s",
+                selected_language,
+                metadata,
+            )
             return stt.SpeechResult(None, stt.SpeechResultState.ERROR)
 
         if not text:

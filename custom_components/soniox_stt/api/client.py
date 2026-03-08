@@ -1,15 +1,26 @@
-"""API client for the Soniox speech-to-text service."""
+"""SDK-backed client for the Soniox speech-to-text service."""
 
 from __future__ import annotations
 
 import asyncio
-import socket
-from collections.abc import Sequence
-from typing import Any
+from typing import Final
 
-import aiohttp
+from soniox import AsyncSonioxClient
+from soniox.errors import (
+    SonioxAPIError as SDKSonioxAPIError,
+    SonioxAuthenticationError as SDKSonioxAuthenticationError,
+    SonioxError as SDKSonioxError,
+    SonioxRealtimeError as SDKSonioxRealtimeError,
+    SonioxValidationError as SDKSonioxValidationError,
+)
+from soniox.types import Token
+from soniox.types.realtime import RealtimeSTTConfig
+from soniox.utils import render_tokens
 
-from ..const import DEFAULT_MODEL, POLL_INTERVAL_SECONDS, TRANSCRIPTION_TIMEOUT_SECONDS
+from ..const import DEFAULT_MODEL
+
+CHUNK_SIZE_BYTES: Final = 4096
+KEEP_ALIVE_SECONDS: Final = 10.0
 
 
 class SonioxError(Exception):
@@ -29,201 +40,112 @@ class SonioxTranscriptionError(SonioxError):
 
 
 class SonioxApiClient:
-    """Thin async client for the Soniox REST API."""
+    """Thin async wrapper around the official Soniox SDK."""
 
     def __init__(
         self,
         api_key: str,
-        session: aiohttp.ClientSession,
         model: str = DEFAULT_MODEL,
     ) -> None:
         """Initialize the Soniox client."""
         self._api_key = api_key
-        self._session = session
+        self._client = AsyncSonioxClient(api_key=api_key)
         self._model = model
 
+    async def async_aclose(self) -> None:
+        """Close the underlying Soniox SDK client."""
+        await self._client.aclose()
+
     async def async_get_supported_languages(self) -> tuple[str, ...]:
-        """Return the supported languages for the configured async model."""
-        response = await self._request("get", "/v1/models")
-        models: Sequence[dict[str, Any]] = response.get("models", [])
+        """Return the supported languages for the configured realtime model."""
+        try:
+            response = await self._client.models.list()
+        except SDKSonioxAuthenticationError as err:
+            raise SonioxAuthenticationError(str(err)) from err
+        except (SDKSonioxAPIError, SDKSonioxError, TimeoutError) as err:
+            raise SonioxCommunicationError(str(err)) from err
 
-        for model in models:
-            if model.get("id") == self._model:
-                return self._extract_language_codes(model)
+        for model in response.models:
+            if model.id == self._model:
+                return tuple(sorted(language.code for language in model.languages))
 
-        async_models = [
-            model
-            for model in models
-            if isinstance(model.get("id"), str) and str(model["id"]).startswith("stt-async")
-        ]
-        if async_models:
-            return self._extract_language_codes(async_models[0])
+        realtime_models = [model for model in response.models if model.id.startswith("stt-rt")]
+        if realtime_models:
+            return tuple(sorted(language.code for language in realtime_models[0].languages))
 
         msg = f"Soniox model {self._model} is not available for this API key"
         raise SonioxError(msg)
 
-    async def async_transcribe(
+    async def async_transcribe_stream(
         self,
         *,
-        audio: bytes,
-        filename: str,
-        content_type: str,
+        audio_stream,
         language: str | None,
     ) -> str:
-        """Upload audio to Soniox and return the final transcript text."""
-        file_id: str | None = None
-        transcription_id: str | None = None
+        """Stream audio to Soniox and return the final transcript text."""
+        config = RealtimeSTTConfig(
+            model=self._model,
+            audio_format="pcm_s16le",
+            num_channels=1,
+            sample_rate=16000,
+            language_hints=[language] if language else None,
+            language_hints_strict=bool(language),
+        )
+
+        final_tokens: list[Token] = []
+        non_final_tokens: list[Token] = []
+        sender_task: asyncio.Task[None] | None = None
+        keep_alive_task: asyncio.Task[None] | None = None
 
         try:
-            file_id = await self._upload_file(audio=audio, filename=filename, content_type=content_type)
-            transcription_id = await self._create_transcription(file_id=file_id, language=language)
-            await self._wait_until_completed(transcription_id)
-            transcript = await self._get_transcript(transcription_id)
+            async with self._client.realtime.stt.connect(config=config) as session:
+                sender_task = asyncio.create_task(self._send_audio(session, audio_stream))
+                keep_alive_task = asyncio.create_task(self._keep_alive(session))
+
+                async for event in session.receive_events():
+                    if event.error_message:
+                        raise SonioxTranscriptionError(event.error_message)
+
+                    final_tokens = [token for token in event.tokens if token.is_final]
+                    non_final_tokens = [token for token in event.tokens if not token.is_final]
+
+                    if event.finished:
+                        break
+
+                if sender_task is not None:
+                    await sender_task
+        except SDKSonioxAuthenticationError as err:
+            raise SonioxAuthenticationError(str(err)) from err
+        except (SDKSonioxRealtimeError, SDKSonioxAPIError, SDKSonioxValidationError) as err:
+            raise SonioxTranscriptionError(str(err)) from err
+        except TimeoutError as err:
+            raise SonioxCommunicationError(str(err)) from err
+        except SDKSonioxError as err:
+            raise SonioxCommunicationError(str(err)) from err
         finally:
-            if transcription_id is not None:
-                await self._best_effort_delete_transcription(transcription_id)
-            elif file_id is not None:
-                await self._best_effort_delete_file(file_id)
+            if keep_alive_task is not None:
+                keep_alive_task.cancel()
+                await asyncio.gather(keep_alive_task, return_exceptions=True)
+            if sender_task is not None and not sender_task.done():
+                sender_task.cancel()
+                await asyncio.gather(sender_task, return_exceptions=True)
+
+        transcript = render_tokens(final_tokens, non_final_tokens).strip()
+        if not transcript:
+            msg = "Soniox did not return any transcript text"
+            raise SonioxTranscriptionError(msg)
 
         return transcript
 
-    async def _upload_file(
-        self,
-        *,
-        audio: bytes,
-        filename: str,
-        content_type: str,
-    ) -> str:
-        """Upload audio bytes and return the Soniox file id."""
-        form = aiohttp.FormData()
-        form.add_field("file", audio, filename=filename, content_type=content_type)
-        response = await self._request("post", "/v1/files", data=form)
+    async def _send_audio(self, session, audio_stream) -> None:
+        """Send audio chunks to the active Soniox realtime session."""
+        async for chunk in audio_stream:
+            if chunk:
+                await session.send_byte_chunk(bytes(chunk))
+        await session.send_finish()
 
-        file_id = response.get("id")
-        if not isinstance(file_id, str):
-            msg = "Soniox upload response did not include a file id"
-            raise SonioxError(msg)
-        return file_id
-
-    async def _create_transcription(self, *, file_id: str, language: str | None) -> str:
-        """Create a transcription job and return its id."""
-        payload: dict[str, Any] = {
-            "model": self._model,
-            "file_id": file_id,
-        }
-        if language:
-            payload["language_hints"] = [language]
-            payload["language_hints_strict"] = True
-
-        response = await self._request("post", "/v1/transcriptions", json=payload)
-        transcription_id = response.get("id")
-        if not isinstance(transcription_id, str):
-            msg = "Soniox transcription response did not include an id"
-            raise SonioxError(msg)
-        return transcription_id
-
-    async def _wait_until_completed(self, transcription_id: str) -> None:
-        """Poll Soniox until the transcription finishes or fails."""
-        async with asyncio.timeout(TRANSCRIPTION_TIMEOUT_SECONDS):
-            while True:
-                response = await self._request("get", f"/v1/transcriptions/{transcription_id}")
-                status = response.get("status")
-
-                if status == "completed":
-                    return
-                if status == "error":
-                    msg = response.get("error_message", "Soniox returned an unknown transcription error")
-                    raise SonioxTranscriptionError(msg)
-
-                await asyncio.sleep(POLL_INTERVAL_SECONDS)
-
-    async def _get_transcript(self, transcription_id: str) -> str:
-        """Fetch and render the final Soniox transcript."""
-        response = await self._request("get", f"/v1/transcriptions/{transcription_id}/transcript")
-        tokens = response.get("tokens", [])
-
-        if not isinstance(tokens, list):
-            msg = "Soniox transcript response did not include tokens"
-            raise SonioxError(msg)
-
-        return self._render_tokens(tokens).strip()
-
-    def _render_tokens(self, tokens: list[dict[str, Any]]) -> str:
-        """Convert Soniox tokens into readable text."""
-        parts: list[str] = []
-
-        for token in tokens:
-            text = token.get("text")
-            if isinstance(text, str):
-                parts.append(text)
-
-        return "".join(parts)
-
-    def _extract_language_codes(self, model: dict[str, Any]) -> tuple[str, ...]:
-        """Extract ISO language codes from a Soniox model payload."""
-        languages = model.get("languages", [])
-        if not isinstance(languages, list):
-            msg = "Soniox model response did not include a valid languages list"
-            raise SonioxError(msg)
-
-        codes: list[str] = []
-        for language in languages:
-            if isinstance(language, dict):
-                code = language.get("code")
-                if isinstance(code, str):
-                    codes.append(code)
-
-        return tuple(sorted(codes))
-
-    async def _best_effort_delete_transcription(self, transcription_id: str) -> None:
-        """Delete a transcription without masking the original result."""
-        try:
-            await self._request("delete", f"/v1/transcriptions/{transcription_id}", allow_empty=True)
-        except SonioxError:
-            return
-
-    async def _best_effort_delete_file(self, file_id: str) -> None:
-        """Delete an uploaded file without masking the original result."""
-        try:
-            await self._request("delete", f"/v1/files/{file_id}", allow_empty=True)
-        except SonioxError:
-            return
-
-    async def _request(
-        self,
-        method: str,
-        path: str,
-        *,
-        allow_empty: bool = False,
-        **kwargs: Any,
-    ) -> Any:
-        """Perform an authenticated request against the Soniox API."""
-        try:
-            async with asyncio.timeout(10):
-                async with self._session.request(
-                    method=method,
-                    url=f"https://api.soniox.com{path}",
-                    headers={"Authorization": f"Bearer {self._api_key}"},
-                    **kwargs,
-                ) as response:
-                    if response.status in (401, 403):
-                        msg = "Soniox API key is invalid"
-                        raise SonioxAuthenticationError(msg)
-
-                    response.raise_for_status()
-
-                    if allow_empty and response.status == 204:
-                        return None
-
-                    return await response.json()
-        except TimeoutError as exception:
-            msg = f"Timed out while talking to Soniox: {exception}"
-            raise SonioxCommunicationError(msg) from exception
-        except (aiohttp.ClientError, socket.gaierror) as exception:
-            msg = f"Error talking to Soniox: {exception}"
-            raise SonioxCommunicationError(msg) from exception
-        except SonioxError:
-            raise
-        except Exception as exception:
-            msg = f"Unexpected Soniox API error: {exception}"
-            raise SonioxError(msg) from exception
+    async def _keep_alive(self, session) -> None:
+        """Keep the realtime websocket alive while audio is streaming."""
+        while True:
+            await asyncio.sleep(KEEP_ALIVE_SECONDS)
+            await session.send_keep_alive()
