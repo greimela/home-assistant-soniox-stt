@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterable, AsyncIterator
+import json
+import ssl
 from typing import Final
 
 from soniox import AsyncSonioxClient
@@ -14,8 +17,11 @@ from soniox.errors import (
     SonioxValidationError as SDKSonioxValidationError,
 )
 from soniox.types import Token
-from soniox.types.realtime import RealtimeSTTConfig
+from soniox.types.realtime import RealtimeEvent, RealtimeSTTConfig
 from soniox.utils import render_tokens
+from websockets.asyncio.client import connect
+from websockets.asyncio.connection import Connection
+from websockets.exceptions import ConnectionClosed
 
 from custom_components.soniox_stt.const import DEFAULT_MODEL
 
@@ -51,6 +57,7 @@ class SonioxApiClient:
         self._api_key = api_key
         self._client = AsyncSonioxClient(api_key=api_key)
         self._model = model
+        self._ssl_context: ssl.SSLContext | None = None
 
     async def async_aclose(self) -> None:
         """Close the underlying Soniox SDK client."""
@@ -79,34 +86,38 @@ class SonioxApiClient:
     async def async_transcribe_stream(
         self,
         *,
-        audio_stream,
+        audio_stream: AsyncIterable[bytes],
         language: str | None,
     ) -> str:
         """Stream audio to Soniox and return the final transcript text."""
         config = RealtimeSTTConfig(
             model=self._model,
-            audio_format="pcm_s16le",
-            num_channels=1,
-            sample_rate=16000,
+            audio_format="auto",
             language_hints=[language] if language else None,
             language_hints_strict=bool(language),
         )
 
+        final_tokens: list[Token] = []
+        non_final_tokens: list[Token] = []
         transcript = ""
+        last_event: RealtimeEvent | None = None
         sender_task: asyncio.Task[None] | None = None
         keep_alive_task: asyncio.Task[None] | None = None
 
         try:
-            async with self._client.realtime.stt.connect(config=config) as session:
+            async with await self._async_connect_realtime(config) as session:
                 sender_task = asyncio.create_task(self._send_audio(session, audio_stream))
                 keep_alive_task = asyncio.create_task(self._keep_alive(session))
 
-                async for event in session.receive_events():
+                async for event in self._receive_events(session):
+                    last_event = event
                     if event.error_message:
                         raise SonioxTranscriptionError(event.error_message)
 
                     if event.tokens:
-                        rendered = self._render_event_tokens(event.tokens).strip()
+                        final_tokens.extend(token for token in event.tokens if token.is_final)
+                        non_final_tokens = [token for token in event.tokens if not token.is_final]
+                        rendered = render_tokens(final_tokens, non_final_tokens).strip()
                         if rendered:
                             transcript = rendered
 
@@ -132,27 +143,62 @@ class SonioxApiClient:
                 await asyncio.gather(sender_task, return_exceptions=True)
 
         if not transcript:
-            msg = "Soniox did not return any transcript text"
+            details = ""
+            if last_event is not None:
+                details = (
+                    f" (finished={last_event.finished}, "
+                    f"tokens={len(last_event.tokens)}, "
+                    f"error={last_event.error_message!r})"
+                )
+            msg = f"Soniox did not return any transcript text{details}"
             raise SonioxTranscriptionError(msg)
 
         return transcript
 
-    async def _send_audio(self, session, audio_stream) -> None:
+    async def _send_audio(self, session: Connection, audio_stream: AsyncIterable[bytes]) -> None:
         """Send audio chunks to the active Soniox realtime session."""
         async for chunk in audio_stream:
             if chunk:
-                await session.send_byte_chunk(bytes(chunk))
-        await session.send_finalize()
-        await session.send_finish()
+                await session.send(bytes(chunk))
+        await session.send(json.dumps({"type": "finalize"}))
+        await session.send("")
 
-    async def _keep_alive(self, session) -> None:
+    async def _keep_alive(self, session: Connection) -> None:
         """Keep the realtime websocket alive while audio is streaming."""
         while True:
             await asyncio.sleep(KEEP_ALIVE_SECONDS)
-            await session.send_keep_alive()
+            await session.send(json.dumps({"type": "keepalive"}))
 
-    def _render_event_tokens(self, tokens: list[Token]) -> str:
-        """Render a Soniox realtime event into human-readable text."""
-        final_tokens = [token for token in tokens if token.is_final]
-        non_final_tokens = [token for token in tokens if not token.is_final]
-        return render_tokens(final_tokens, non_final_tokens)
+    async def _async_connect_realtime(self, config: RealtimeSTTConfig) -> Connection:
+        """Open a realtime websocket using a prebuilt SSL context."""
+        ssl_context = await self._async_get_ssl_context()
+        session = await connect(
+            self._client.websocket_base_url,
+            ssl=ssl_context,
+        )
+        try:
+            await session.send(json.dumps(config.build_payload(self._api_key).model_dump(exclude_none=True)))
+        except Exception:
+            await session.close()
+            raise
+        else:
+            return session
+
+    async def _async_get_ssl_context(self) -> ssl.SSLContext:
+        """Create the default SSL context outside the event loop."""
+        if self._ssl_context is None:
+            self._ssl_context = await asyncio.to_thread(ssl.create_default_context)
+        return self._ssl_context
+
+    async def _receive_events(self, session: Connection) -> AsyncIterator[RealtimeEvent]:
+        """Yield parsed Soniox realtime events from the websocket."""
+        while True:
+            try:
+                raw = await session.recv()
+            except ConnectionClosed:
+                break
+
+            if raw in ("", b""):
+                break
+
+            yield RealtimeEvent.validate_event(raw)
